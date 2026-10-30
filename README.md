@@ -1,3 +1,5 @@
+![Banner](banner.png)
+
 # misconfig-ConfigBaselineComparator
 Compares the current configuration against a known good baseline (e.g., from a golden image or approved template), flagging deviations. Uses `diff` and `pyyaml` or `json` for formatted output. - Focused on Check for misconfigurations in configuration files or infrastructure definitions
 
