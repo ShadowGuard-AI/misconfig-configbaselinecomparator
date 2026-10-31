@@ -28,6 +28,7 @@ class ConfigBaselineComparator:
         self.current_config_path = current_config_path
         self.baseline_config_path = baseline_config_path
         self.output_format = output_format
+        self.has_differences = False
         self.logger = logging.getLogger(__name__)
 
 
@@ -106,7 +107,8 @@ class ConfigBaselineComparator:
                 self.logger.warning(f"Unknown linter type: {linter_type}. Skipping linting.")
                 return True
         except FileNotFoundError as e:
-            self.logger.warning(f"{linter_type} not found. Skipping linting.  Ensure {linter_type} is installed and in your PATH.")
+            binary = "yamllint" if linter_type == "yaml" else "jsonlint" if linter_type == "json" else linter_type
+            self.logger.warning(f"{binary} not found. Skipping linting.  Ensure {binary} is installed and in your PATH.")
             return True # Non-critical, so continue execution
         except subprocess.CalledProcessError as e:
             self.logger.error(f"{linter_type} found errors in {file_path}:\n{e.stderr}")
@@ -123,7 +125,12 @@ class ConfigBaselineComparator:
 
         Returns:
             str: The comparison output, formatted according to `self.output_format`.
-            None: If there are no differences.
+            None: If there are no differences, in diff format only.
+
+        Raises:
+            Exception: Any load, validation, lint, or empty input failure is
+                raised to the caller instead of being reported as a clean
+                comparison.
         """
         try:
             # Input validation
@@ -148,6 +155,15 @@ class ConfigBaselineComparator:
 
             current_config = self._load_config(self.current_config_path)
             baseline_config = self._load_config(self.baseline_config_path)
+
+            # An empty file parses to None, and there is nothing to compare in it.
+            for config_path, parsed in ((self.current_config_path, current_config), (self.baseline_config_path, baseline_config)):
+                if parsed is None:
+                    with open(config_path, 'r') as f:
+                        if not f.read().strip():
+                            raise ValueError(f"Empty configuration file: {config_path}. Nothing was compared.")
+
+            self.has_differences = current_config != baseline_config
 
             if self.output_format == "diff":
                 # Create temporary files for generating diff
@@ -182,15 +198,15 @@ class ConfigBaselineComparator:
         except FileNotFoundError as e:
             self.logger.error(f"File not found: {e}")
             print(f"Error: {e}", file=sys.stderr) # Print to stderr for user feedback
-            return None
+            raise
         except ValueError as e:
             self.logger.error(f"ValueError: {e}")
             print(f"Error: {e}", file=sys.stderr)
-            return None
+            raise
         except Exception as e:
             self.logger.exception("An unexpected error occurred.")
             print(f"An unexpected error occurred: {e}", file=sys.stderr)
-            return None
+            raise
 
 
 def setup_argparse():
@@ -219,14 +235,17 @@ def main():
 
     try:
         comparison_result = comparator.compare_configs()
-
-        if comparison_result:
-            print(comparison_result)
-        else:
-            print("No differences found between the configurations.")
-
     except Exception as e:
         logging.error(f"An error occurred: {e}")
+        sys.exit(1)
+
+    if comparison_result:
+        print(comparison_result)
+    else:
+        print("No differences found between the configurations.")
+
+    # The verdict reaches the exit code: differing configurations exit 1.
+    if comparator.has_differences:
         sys.exit(1)
 
 if __name__ == "__main__":
