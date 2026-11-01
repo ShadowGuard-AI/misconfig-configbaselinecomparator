@@ -48,9 +48,17 @@ class ConfigBaselineComparator:
         try:
             with open(config_path, 'r') as f:
                 # Attempt to automatically detect format based on file extension
+                # The suffix chooses the parser. A JSON file renamed to .yaml is
+                # safe because YAML reads JSON, but a YAML file renamed to .json
+                # fails here even though the content is perfectly parseable by
+                # the other branch.
                 if config_path.lower().endswith(('.yaml', '.yml')):
                     return yaml.safe_load(f)
                 elif config_path.lower().endswith('.json'):
+                    # This fallback rarely gets a fair chance: the YAML attempt above
+                    # has already consumed the file object, so this reads from the
+                    # end of the file. In practice a document YAML rejects is almost
+                    # never rescued by the JSON attempt after it.
                     return json.load(f)
                 else:
                     # Attempt to load as YAML first, then JSON if that fails
@@ -109,6 +117,11 @@ class ConfigBaselineComparator:
         except FileNotFoundError as e:
             binary = "yamllint" if linter_type == "yaml" else "jsonlint" if linter_type == "json" else linter_type
             self.logger.warning(f"{binary} not found. Skipping linting.  Ensure {binary} is installed and in your PATH.")
+            # A missing linter and a passing linter return the same thing.
+            # I chose that on purpose: the comparison itself is the job, and
+            # refusing to run because an optional checker is absent would
+            # make the tool useless on a plain machine. A linter that runs
+            # and fails is different, and that path returns False above.
             return True # Non-critical, so continue execution
         except subprocess.CalledProcessError as e:
             self.logger.error(f"{linter_type} found errors in {file_path}:\n{e.stderr}")
@@ -138,6 +151,9 @@ class ConfigBaselineComparator:
             self._validate_file_exists(self.baseline_config_path)
 
             # Lint current config
+            # Linting is chosen by suffix too, and only in compare_configs.
+            # A file with no suffix is never linted at all, whatever it holds,
+            # because neither branch claims it.
             if self.current_config_path.lower().endswith(('.yaml', '.yml')):
                 if not self._run_linter(self.current_config_path, "yaml"):
                     raise ValueError(f"YAML linting failed for {self.current_config_path}")
@@ -158,16 +174,26 @@ class ConfigBaselineComparator:
 
             # An empty file parses to None, and there is nothing to compare in it.
             for config_path, parsed in ((self.current_config_path, current_config), (self.baseline_config_path, baseline_config)):
+                # None is also what a file holding only comments, or the literal
+                # word null, parses to. Those are not treated as empty here, so
+                # they go on to be compared as a None config instead of failing.
                 if parsed is None:
                     with open(config_path, 'r') as f:
                         if not f.read().strip():
                             raise ValueError(f"Empty configuration file: {config_path}. Nothing was compared.")
 
+            # This one comparison is the verdict for the whole run, and it
+            # compares parsed values, so a list reordered counts as a
+            # difference while a mapping reordered does not.
             self.has_differences = current_config != baseline_config
 
             if self.output_format == "diff":
                 # Create temporary files for generating diff
                 with tempfile.NamedTemporaryFile(mode='w', delete=False) as current_temp, tempfile.NamedTemporaryFile(mode='w', delete=False) as baseline_temp:
+                    # The diff is built from re-serialised parsed data, sorted by
+                    # key, not from the original files. Formatting changes, comment
+                    # changes, and key reordering in the source files are invisible
+                    # to this comparison by design: I compare settings, not text.
                     json.dump(current_config, current_temp, indent=4, sort_keys=True)
                     json.dump(baseline_config, baseline_temp, indent=4, sort_keys=True)
                     current_temp_path = current_temp.name
@@ -183,6 +209,10 @@ class ConfigBaselineComparator:
                     diff_string = ''.join(diff)
                 finally:
                     # Clean up temporary files
+                    # The temp files are created with delete=False because they have
+                    # to be reopened by name after closing. That makes this cleanup
+                    # load bearing: an exception between creation and this finally
+                    # block is the only path that leaves them behind.
                     os.remove(current_temp_path)
                     os.remove(baseline_temp_path)
                 if diff_string:
@@ -191,6 +221,9 @@ class ConfigBaselineComparator:
                     return None  # No differences
             elif self.output_format == "json":
                 #  Return the configurations as JSON
+                # JSON output returns both full configs whether or not they
+                # differ. The caller learns the verdict from the exit code in
+                # main, not from anything inside this payload.
                 return json.dumps({"current": current_config, "baseline": baseline_config}, indent=4, sort_keys=True)
             else:
                 raise ValueError(f"Unsupported output format: {self.output_format}")
